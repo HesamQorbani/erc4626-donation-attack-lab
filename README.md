@@ -1,8 +1,10 @@
 # ERC-4626 Donation Attack Lab
 
+![test](https://github.com/HesamQorbani/erc4626-donation-attack-lab/actions/workflows/test.yml/badge.svg)
+
 A small Foundry project that shows the ERC-4626 "donation / inflation" attack and one way to fix it.
 
-> Built while learning, with the help of an AI assistant (Claude). Simplified vaults, **not audited, not for production**.
+> Built while learning, with the help of an AI assistant (Claude). I ran the tests myself. Simplified vaults, **not audited, not for production**.
 
 ## What is in here
 
