@@ -1,22 +1,39 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {IERC20Like} from "./IERC20Like.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title SafeVault
-/// @notice Same vault as VulnerableVault, plus "virtual shares and assets" (an OpenZeppelin-style offset).
-/// @dev Simplified and NOT audited. The offset makes the donation attack lose money for the attacker.
-contract SafeVault {
-    error ZeroShares();
+/// @notice Simplified vault demonstrating virtual shares and assets
+///         as a mitigation for the ERC-4626 donation attack.
+/// @dev Supports fee-on-transfer tokens by accounting for actual
+///      received assets. NOT ERC-4626 compliant and NOT audited
+///      for production use.
+contract SafeVault is ReentrancyGuard {
+    using SafeERC20 for IERC20;
 
-    uint256 private constant VIRTUAL_SHARES = 1000; // 10 ** 3 offset on shares
+    error ZeroShares();
+    error ZeroAssetAddress();
+
+    uint256 private constant VIRTUAL_SHARES = 1000;
     uint256 private constant VIRTUAL_ASSETS = 1;
 
-    IERC20Like public immutable asset;
+    IERC20 public immutable asset;
+
     uint256 public totalShares;
     mapping(address => uint256) public sharesOf;
 
-    constructor(IERC20Like _asset) {
+    event Deposit(address indexed caller, uint256 assets, uint256 shares);
+    event Redeem(address indexed caller, uint256 shares, uint256 assets);
+
+    constructor(IERC20 _asset) {
+        if (address(_asset) == address(0)) {
+            revert ZeroAssetAddress();
+        }
+
         asset = _asset;
     }
 
@@ -24,28 +41,47 @@ contract SafeVault {
         return asset.balanceOf(address(this));
     }
 
-    /// @dev Rounds down (correct for deposits).
     function convertToShares(uint256 assets) public view returns (uint256) {
-        return (assets * (totalShares + VIRTUAL_SHARES)) / (totalAssets() + VIRTUAL_ASSETS);
+        return Math.mulDiv(assets, totalShares + VIRTUAL_SHARES, totalAssets() + VIRTUAL_ASSETS);
     }
 
-    /// @dev Rounds down (correct for redeems).
     function convertToAssets(uint256 shares) public view returns (uint256) {
-        return (shares * (totalAssets() + VIRTUAL_ASSETS)) / (totalShares + VIRTUAL_SHARES);
+        return Math.mulDiv(shares, totalAssets() + VIRTUAL_ASSETS, totalShares + VIRTUAL_SHARES);
     }
 
-    function deposit(uint256 assets) external returns (uint256 shares) {
-        shares = convertToShares(assets); // must be computed BEFORE the transfer
-        if (shares == 0) revert ZeroShares();
-        asset.transferFrom(msg.sender, address(this), assets);
+    function deposit(uint256 assets) external nonReentrant returns (uint256 shares) {
+        uint256 assetsBefore = totalAssets();
+
+        asset.safeTransferFrom(msg.sender, address(this), assets);
+
+        uint256 assetsReceived = totalAssets() - assetsBefore;
+
+        shares = Math.mulDiv(assetsReceived, totalShares + VIRTUAL_SHARES, assetsBefore + VIRTUAL_ASSETS);
+
+        if (shares == 0) {
+            revert ZeroShares();
+        }
+
         totalShares += shares;
         sharesOf[msg.sender] += shares;
+
+        // The actual received amount is known only after safeTransferFrom.
+        // All state-changing vault entry points are protected by nonReentrant.
+        // forge-lint: disable-next-line(reentrancy-events)
+        emit Deposit(msg.sender, assetsReceived, shares);
     }
 
-    function redeem(uint256 shares) external returns (uint256 assets) {
+    function redeem(uint256 shares) external nonReentrant returns (uint256 assets) {
         assets = convertToAssets(shares);
+
         sharesOf[msg.sender] -= shares;
         totalShares -= shares;
-        asset.transfer(msg.sender, assets);
+
+        // The preceding balanceOf call uses STATICCALL.
+        // This event is emitted before the outgoing token transfer.
+        // forge-lint: disable-next-line(reentrancy-events)
+        emit Redeem(msg.sender, shares, assets);
+
+        asset.safeTransfer(msg.sender, assets);
     }
 }
